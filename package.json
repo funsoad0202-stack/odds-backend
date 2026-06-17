@@ -1,0 +1,16 @@
+{
+  "name": "odds-backend",
+  "version": "0.1.0",
+  "description": "Бэкенд для дашборда КЭФ·ТРЕКЕР: тянет коэффициенты через The Odds API и отдаёт их в формате фронта",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
