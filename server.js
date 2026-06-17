@@ -1,6 +1,7 @@
 // odds-backend — превращает The Odds API в формат дашборда КЭФ·ТРЕКЕР
 // Node 18+ (глобальный fetch). Запуск: npm install && npm start
 "use strict";
+require("dotenv").config();   // подхватывает ключ из .env при локальном запуске (на Render .env нет — берутся переменные окружения)
 const express = require("express");
 const app = express();
 
@@ -10,23 +11,24 @@ const TTL     = (+process.env.CACHE_TTL || 60) * 1000;    // кэш ответа
 const PORT    = process.env.PORT || 8080;
 const BASE    = "https://api.the-odds-api.com/v4";
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "*"; // в проде впишите адрес вашего сайта
+const INCLUDE_LINKS  = String(process.env.INCLUDE_LINKS) === "true"; // ссылки на событие в БК (может требовать платного тарифа)
 
-// Какие лиги тянуть под каждую вкладку спорта на фронте.
+// Какие лиги тянуть под каждую вкладку спорта на фронте (актуально для июня 2026, меняйте по сезону).
 // 'upcoming' — спец-ключ: ближайшие матчи по всем активным видам спорта в одном запросе (дёшево по квоте).
 // ВНИМАНИЕ: каждый ключ = отдельный запрос к API = расход кредитов. Не раздувайте списки.
 const SPORT_KEYS = {
   all:      ["upcoming"],
-  football: ["soccer_epl", "soccer_spain_la_liga", "soccer_uefa_champs_league"],
-  hockey:   ["icehockey_nhl"],
-  tennis:   [],   // теннис в API сезонный: впишите актуальный ключ турнира из /api/sports
-  basket:   ["basketball_nba", "basketball_euroleague"],
+  football: ["soccer_fifa_world_cup", "soccer_sweden_allsvenskan", "soccer_conmebol_copa_libertadores"],
+  hockey:   ["icehockey_ahl"],
+  tennis:   ["tennis_atp_halle_open", "tennis_atp_queens_club_champ", "tennis_wta_german_open"],
+  basket:   ["basketball_wnba"],
 };
 
 const categoryOf = (k = "") =>
   k.startsWith("soccer")     ? "football" :
   k.startsWith("icehockey")  ? "hockey"   :
   k.startsWith("basketball") ? "basket"   :
-  k.startsWith("tennis")     ? "tennis"   : "football";
+  k.startsWith("tennis")     ? "tennis"   : "other";
 
 const cache = new Map(); // sport -> { t, data }
 
@@ -41,7 +43,8 @@ app.use((req, res, next) => {
 
 async function fetchSport(key) {
   const url = `${BASE}/sports/${key}/odds?apiKey=${KEY}&regions=${REGIONS}` +
-              `&markets=h2h,totals,spreads&oddsFormat=decimal&dateFormat=iso`;
+              `&markets=h2h,totals,spreads&oddsFormat=decimal&dateFormat=iso` +
+              (INCLUDE_LINKS ? "&includeLinks=true" : "");
   const r = await fetch(url);
   if (!r.ok) return [];          // неактивный/неизвестный ключ — просто пропускаем
   return r.json();
@@ -58,6 +61,17 @@ function normalizeEvent(ev) {
   const markets = {};
   const bms = ev.bookmakers || [];
 
+  // Ссылка на событие у каждой БК (если includeLinks=true и контора её отдаёт).
+  // Берём самую глубокую: купон outcome.link -> рынок market.link -> событие bk.link.
+  const evLink = {};
+  for (const bk of bms) {
+    let l = bk.link || null;
+    if (!l) for (const mk of (bk.markets || [])) { if (mk.link) { l = mk.link; break; } }
+    if (!l) for (const mk of (bk.markets || [])) { for (const oc of (mk.outcomes || [])) { if (oc.link) { l = oc.link; break; } } if (l) break; }
+    if (l) evLink[bk.key] = l;
+  }
+  const cell = (bkKey, price) => ({ odd: price, link: evLink[bkKey] || null });
+
   // --- Исход (h2h -> 1x2) ---
   const h2h = {};
   for (const bk of bms) {
@@ -65,7 +79,7 @@ function normalizeEvent(ev) {
     if (!m) continue;
     for (const o of m.outcomes) {
       const key = o.name === ev.home_team ? "1" : o.name === ev.away_team ? "2" : "X";
-      (h2h[key] = h2h[key] || {})[bk.key] = { odd: o.price };
+      (h2h[key] = h2h[key] || {})[bk.key] = cell(bk.key, o.price);
     }
   }
   const order = [["1", "П1"], ["X", "Ничья"], ["2", "П2"]];
@@ -87,7 +101,7 @@ function normalizeEvent(ev) {
     const at = tRows.filter((x) => x.point === pt);
     if (at.length) {
       const over = {}, under = {};
-      for (const x of at) { over[x.book] = { odd: x.over }; under[x.book] = { odd: x.under }; }
+      for (const x of at) { over[x.book] = cell(x.book, x.over); under[x.book] = cell(x.book, x.under); }
       markets["total"] = { label: "Тотал", lineLabel: String(pt),
         outcomes: [{ key: "o", label: "Больше " + pt, books: over }, { key: "u", label: "Меньше " + pt, books: under }] };
     }
@@ -113,7 +127,7 @@ function normalizeEvent(ev) {
     const at = sRows.filter((x) => x.ap === pt);
     if (at.length) {
       const h1 = {}, h2 = {}; let l1 = 0, l2 = 0;
-      for (const x of at) { h1[x.book] = { odd: x.h1.price }; h2[x.book] = { odd: x.h2.price }; l1 = x.h1.point; l2 = x.h2.point; }
+      for (const x of at) { h1[x.book] = cell(x.book, x.h1.price); h2[x.book] = cell(x.book, x.h2.price); l1 = x.h1.point; l2 = x.h2.point; }
       const fmt = (n) => (n > 0 ? "+" + n : "" + n);
       markets["hcap"] = { label: "Фора", lineLabel: null,
         outcomes: [{ key: "h1", label: `Ф1 (${fmt(l1)})`, books: h1 }, { key: "h2", label: `Ф2 (${fmt(l2)})`, books: h2 }] };
