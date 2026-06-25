@@ -15,20 +15,59 @@ const INCLUDE_LINKS  = String(process.env.INCLUDE_LINKS) === "true"; // ссыл
 
 // Какие лиги тянуть под каждую вкладку спорта на фронте (актуально для июня 2026, меняйте по сезону).
 // 'upcoming' — спец-ключ: ближайшие матчи по всем активным видам спорта в одном запросе (дёшево по квоте).
-// ВНИМАНИЕ: каждый ключ = отдельный запрос к API = расход кредитов. Не раздувайте списки.
+// ВНИМАНИЕ: каждый ключ = отдельный запрос к API = расход кредитов. Бережно с активными во время сезона.
+//
+// Стратегия: на вкладке "all" — только upcoming (1 запрос ловит всё активное).
+// На отдельных вкладках — по 5-7 топ-лиг по виду спорта. Большинство неактивных вне сезона
+// просто вернут пустой ответ — это бесплатно.
 const SPORT_KEYS = {
   all:      ["upcoming"],
-  football: ["soccer_fifa_world_cup", "soccer_sweden_allsvenskan", "soccer_conmebol_copa_libertadores"],
-  hockey:   ["icehockey_ahl"],
-  tennis:   ["tennis_atp_halle_open", "tennis_atp_queens_club_champ", "tennis_wta_german_open"],
-  basket:   ["basketball_wnba"],
+  football: [
+    "soccer_epl",                          // АПЛ
+    "soccer_spain_la_liga",                // Ла Лига
+    "soccer_germany_bundesliga",           // Бундеслига
+    "soccer_italy_serie_a",                // Серия А
+    "soccer_france_ligue_one",             // Лига 1
+    "soccer_uefa_champs_league",           // Лига Чемпионов
+    "soccer_uefa_europa_league",           // Лига Европы
+    "soccer_russia_premier_league",        // РПЛ (если активна в сезоне)
+    "soccer_fifa_world_cup",               // ЧМ
+  ],
+  hockey:   [
+    "icehockey_nhl",                       // НХЛ
+    "icehockey_ahl",                       // АХЛ (фарм-лига НХЛ)
+    "icehockey_sweden_hockey_league",      // Швед. хоккей
+  ],
+  tennis:   [
+    "tennis_atp_french_open",
+    "tennis_atp_wimbledon",
+    "tennis_atp_us_open",
+    "tennis_atp_aus_open_singles",
+    "tennis_wta_french_open",
+    "tennis_wta_wimbledon",
+    "tennis_wta_us_open",
+  ],
+  basket:   [
+    "basketball_nba",                      // НБА
+    "basketball_euroleague",               // Евролига
+    "basketball_wnba",                     // ВНБА
+    "basketball_ncaab",                    // NCAA (US college)
+  ],
+  mma:      ["mma_mixed_martial_arts"],    // UFC и др. (вкладка может появиться позже)
+  esports:  [
+    "esports_csgo",                        // CS2 / CSGO
+    "esports_dota_2",                      // Dota 2
+    "esports_lol",                         // LoL (если активна)
+  ],
 };
 
 const categoryOf = (k = "") =>
   k.startsWith("soccer")     ? "football" :
   k.startsWith("icehockey")  ? "hockey"   :
   k.startsWith("basketball") ? "basket"   :
-  k.startsWith("tennis")     ? "tennis"   : "other";
+  k.startsWith("tennis")     ? "tennis"   :
+  k.startsWith("mma")        ? "mma"      :
+  k.startsWith("esports")    ? "esports"  : "other";
 
 const cache = new Map(); // sport -> { t, data }
 
