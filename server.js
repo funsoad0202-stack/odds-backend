@@ -13,16 +13,23 @@ const BASE    = "https://api.the-odds-api.com/v4";
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "*"; // в проде впишите адрес вашего сайта
 const INCLUDE_LINKS  = String(process.env.INCLUDE_LINKS) === "true"; // ссылки на событие в БК (может требовать платного тарифа)
 
+// ===== простое логирование с временной меткой =====
+const log = (...a) => console.log(new Date().toISOString(), ...a);
+const errlog = (...a) => console.error(new Date().toISOString(), "ERROR:", ...a);
+
+log("starting odds-backend", { REGIONS, TTL_sec: TTL/1000, ALLOWED_ORIGIN, INCLUDE_LINKS, hasKey: !!KEY });
+
 // Какие лиги тянуть под каждую вкладку спорта на фронте (актуально для июня 2026, меняйте по сезону).
 // 'upcoming' — спец-ключ: ближайшие матчи по всем активным видам спорта в одном запросе (дёшево по квоте).
 // ВНИМАНИЕ: каждый ключ = отдельный запрос к API = расход кредитов. Бережно с активными во время сезона.
 //
 // Стратегия: на вкладке "all" — только upcoming (1 запрос ловит всё активное).
-// На отдельных вкладках — по 5-7 топ-лиг по виду спорта. Большинство неактивных вне сезона
+// На отдельных вкладках — топ-лиги по виду спорта. Большинство неактивных вне сезона
 // просто вернут пустой ответ — это бесплатно.
 const SPORT_KEYS = {
   all:      ["upcoming"],
   football: [
+    // ТОП-Европа (зимний сезон, август-май)
     "soccer_epl",                          // АПЛ
     "soccer_spain_la_liga",                // Ла Лига
     "soccer_germany_bundesliga",           // Бундеслига
@@ -30,8 +37,17 @@ const SPORT_KEYS = {
     "soccer_france_ligue_one",             // Лига 1
     "soccer_uefa_champs_league",           // Лига Чемпионов
     "soccer_uefa_europa_league",           // Лига Европы
-    "soccer_russia_premier_league",        // РПЛ (если активна в сезоне)
+    "soccer_russia_premier_league",        // РПЛ
     "soccer_fifa_world_cup",               // ЧМ
+    // ЛЕТНИЕ активные лиги (играют июнь-сентябрь)
+    "soccer_brazil_campeonato",            // Бразилия Серия А — играет круглый год
+    "soccer_mls",                          // MLS (США) — март-октябрь
+    "soccer_sweden_allsvenskan",           // Швеция — апрель-ноябрь
+    "soccer_norway_eliteserien",           // Норвегия — апрель-ноябрь
+    "soccer_argentina_primera_division",   // Аргентина
+    "soccer_japan_j_league",               // Япония — февраль-декабрь
+    "soccer_korea_kleague1",               // Корея
+    "soccer_conmebol_copa_libertadores",   // Кубок Либертадорес
   ],
   hockey:   [
     "icehockey_nhl",                       // НХЛ
@@ -40,24 +56,28 @@ const SPORT_KEYS = {
   ],
   tennis:   [
     "tennis_atp_french_open",
-    "tennis_atp_wimbledon",
+    "tennis_atp_wimbledon",                // стартует 30 июня
     "tennis_atp_us_open",
     "tennis_atp_aus_open_singles",
     "tennis_wta_french_open",
-    "tennis_wta_wimbledon",
+    "tennis_wta_wimbledon",                // стартует 30 июня
     "tennis_wta_us_open",
   ],
   basket:   [
     "basketball_nba",                      // НБА
     "basketball_euroleague",               // Евролига
-    "basketball_wnba",                     // ВНБА
-    "basketball_ncaab",                    // NCAA (US college)
+    "basketball_wnba",                     // ВНБА — играет летом
+    "basketball_ncaab",                    // NCAA
   ],
-  mma:      ["mma_mixed_martial_arts"],    // UFC и др. (вкладка может появиться позже)
+  mma:      ["mma_mixed_martial_arts"],    // UFC и др.
+  // НОВЫЕ ЛЕТНИЕ ВИДЫ СПОРТА (категорируются на фронте как "other" если нет вкладки)
+  baseball: [
+    "baseball_mlb",                        // MLB — главное событие июня-сентября в США
+  ],
   esports:  [
-    "esports_csgo",                        // CS2 / CSGO
-    "esports_dota_2",                      // Dota 2
-    "esports_lol",                         // LoL (если активна)
+    "esports_csgo",                        // CS2 / CSGO — круглый год
+    "esports_dota_2",                      // Dota 2 — круглый год
+    "esports_lol",                         // LoL — круглый год
   ],
 };
 
@@ -66,6 +86,7 @@ const categoryOf = (k = "") =>
   k.startsWith("icehockey")  ? "hockey"   :
   k.startsWith("basketball") ? "basket"   :
   k.startsWith("tennis")     ? "tennis"   :
+  k.startsWith("baseball")   ? "baseball" :
   k.startsWith("mma")        ? "mma"      :
   k.startsWith("esports")    ? "esports"  : "other";
 
@@ -178,10 +199,14 @@ function normalizeEvent(ev) {
 }
 
 app.get("/api/odds", async (req, res) => {
-  if (!KEY) return res.status(500).json({ error: "ODDS_API_KEY не задан" });
+  if (!KEY) { errlog("ODDS_API_KEY not set"); return res.status(500).json({ error: "ODDS_API_KEY не задан" }); }
   const sport = req.query.sport || "all";
   const hit = cache.get(sport);
-  if (hit && Date.now() - hit.t < TTL) return res.json(hit.data);
+  if (hit && Date.now() - hit.t < TTL) {
+    log("/api/odds", sport, "cache hit, events=" + (hit.data.events?.length||0));
+    return res.json(hit.data);
+  }
+  const t0 = Date.now();
   try {
     const keys = SPORT_KEYS[sport] || SPORT_KEYS.all;
     const raw = (await Promise.all(keys.map(fetchSport))).flat();
@@ -191,8 +216,10 @@ app.get("/api/odds", async (req, res) => {
     const books = [...bookMap].map(([id, name]) => ({ id, name }));
     const data = { updatedAt: new Date().toISOString(), books, events };
     cache.set(sport, { t: Date.now(), data });
+    log("/api/odds", sport, "fetched events=" + events.length, "books=" + books.length, "in " + (Date.now()-t0) + "ms");
     res.json(data);
   } catch (e) {
+    errlog("/api/odds", sport, e.message || e);
     res.status(502).json({ error: String(e.message || e) });
   }
 });
@@ -206,4 +233,15 @@ app.get("/api/sports", async (_req, res) => {
 
 app.get("/", (_req, res) => res.json({ ok: true, service: "odds-backend", cacheKeys: [...cache.keys()] }));
 
-app.listen(PORT, () => console.log("odds-backend запущен на :" + PORT));
+// health-чек для мониторинга (Render, UptimeRobot и т.п.). Не использует квоту API.
+app.get("/health", (_req, res) => res.json({
+  ok: true,
+  uptime_sec: Math.floor(process.uptime()),
+  cache_sports: [...cache.keys()],
+  cache_ttl_sec: TTL/1000,
+  has_key: !!KEY,
+  regions: REGIONS,
+  ts: new Date().toISOString()
+}));
+
+app.listen(PORT, () => log("odds-backend listening on :" + PORT));
