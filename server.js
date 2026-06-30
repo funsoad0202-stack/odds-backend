@@ -19,15 +19,23 @@ const errlog = (...a) => console.error(new Date().toISOString(), "ERROR:", ...a)
 
 log("starting odds-backend", { REGIONS, TTL_sec: TTL/1000, ALLOWED_ORIGIN, INCLUDE_LINKS, hasKey: !!KEY });
 
-// Какие лиги тянуть под каждую вкладку спорта на фронте (актуально для июня 2026, меняйте по сезону).
-// 'upcoming' — спец-ключ: ближайшие матчи по всем активным видам спорта в одном запросе (дёшево по квоте).
-// ВНИМАНИЕ: каждый ключ = отдельный запрос к API = расход кредитов. Бережно с активными во время сезона.
-//
-// Стратегия: на вкладке "all" — только upcoming (1 запрос ловит всё активное).
-// На отдельных вкладках — топ-лиги по виду спорта. Большинство неактивных вне сезона
-// просто вернут пустой ответ — это бесплатно.
+// Какие лиги тянуть под каждую вкладку спорта на фронте (актуально для июня 2026).
+// ВАЖНО: ключа 'upcoming' больше нет — он часто не отдаёт котировки на free-тарифе.
+// На вкладке 'all' тянем активные сейчас турниры явно (Wimbledon, MLB, MLS, Бразилия).
+// Большинство неактивных вне сезона просто вернут пустой ответ — это бесплатно по квоте.
 const SPORT_KEYS = {
-  all:      ["upcoming"],
+  // 'all' = сейчас активные турниры (июнь-июль 2026: Уимблдон + летние лиги)
+  all: [
+    "tennis_atp_wimbledon",
+    "tennis_wta_wimbledon",
+    "baseball_mlb",
+    "soccer_mls",
+    "soccer_brazil_campeonato",
+    "soccer_sweden_allsvenskan",
+    "soccer_norway_eliteserien",
+    "soccer_conmebol_copa_libertadores",
+    "mma_mixed_martial_arts",
+  ],
   football: [
     // ТОП-Европа (зимний сезон, август-май)
     "soccer_epl",                          // АПЛ
@@ -40,18 +48,18 @@ const SPORT_KEYS = {
     "soccer_russia_premier_league",        // РПЛ
     "soccer_fifa_world_cup",               // ЧМ
     // ЛЕТНИЕ активные лиги (играют июнь-сентябрь)
-    "soccer_brazil_campeonato",            // Бразилия Серия А — играет круглый год
-    "soccer_mls",                          // MLS (США) — март-октябрь
-    "soccer_sweden_allsvenskan",           // Швеция — апрель-ноябрь
-    "soccer_norway_eliteserien",           // Норвегия — апрель-ноябрь
+    "soccer_brazil_campeonato",            // Бразилия Серия А
+    "soccer_mls",                          // MLS (США)
+    "soccer_sweden_allsvenskan",           // Швеция
+    "soccer_norway_eliteserien",           // Норвегия
     "soccer_argentina_primera_division",   // Аргентина
-    "soccer_japan_j_league",               // Япония — февраль-декабрь
+    "soccer_japan_j_league",               // Япония
     "soccer_korea_kleague1",               // Корея
     "soccer_conmebol_copa_libertadores",   // Кубок Либертадорес
   ],
   hockey:   [
     "icehockey_nhl",                       // НХЛ
-    "icehockey_ahl",                       // АХЛ (фарм-лига НХЛ)
+    "icehockey_ahl",                       // АХЛ
     "icehockey_sweden_hockey_league",      // Швед. хоккей
   ],
   tennis:   [
@@ -70,14 +78,13 @@ const SPORT_KEYS = {
     "basketball_ncaab",                    // NCAA
   ],
   mma:      ["mma_mixed_martial_arts"],    // UFC и др.
-  // НОВЫЕ ЛЕТНИЕ ВИДЫ СПОРТА (категорируются на фронте как "other" если нет вкладки)
   baseball: [
-    "baseball_mlb",                        // MLB — главное событие июня-сентября в США
+    "baseball_mlb",                        // MLB
   ],
   esports:  [
-    "esports_csgo",                        // CS2 / CSGO — круглый год
-    "esports_dota_2",                      // Dota 2 — круглый год
-    "esports_lol",                         // LoL — круглый год
+    "esports_csgo",
+    "esports_dota_2",
+    "esports_lol",
   ],
 };
 
@@ -101,13 +108,26 @@ app.use((req, res, next) => {
   next();
 });
 
+// fetchSport: тянет один турнир, логирует подробно (URL без ключа, статус, кол-во матчей)
 async function fetchSport(key) {
   const url = `${BASE}/sports/${key}/odds?apiKey=${KEY}&regions=${REGIONS}` +
               `&markets=h2h,totals,spreads&oddsFormat=decimal&dateFormat=iso` +
               (INCLUDE_LINKS ? "&includeLinks=true" : "");
-  const r = await fetch(url);
-  if (!r.ok) return [];          // неактивный/неизвестный ключ — просто пропускаем
-  return r.json();
+  const safeUrl = url.replace(KEY, "***");
+  try {
+    const r = await fetch(url);
+    if (!r.ok) {
+      const body = await r.text().catch(() => "");
+      errlog(`fetchSport ${key} HTTP ${r.status}`, safeUrl, "body:", body.slice(0, 200));
+      return [];
+    }
+    const data = await r.json();
+    log(`fetchSport ${key} OK events=${Array.isArray(data) ? data.length : "?"}`);
+    return Array.isArray(data) ? data : [];
+  } catch (e) {
+    errlog(`fetchSport ${key} threw`, safeUrl, e.message || e);
+    return [];
+  }
 }
 
 const modal = (arr) => {         // самое частое значение (для выбора основной линии тотала/форы)
@@ -122,7 +142,6 @@ function normalizeEvent(ev) {
   const bms = ev.bookmakers || [];
 
   // Ссылка на событие у каждой БК (если includeLinks=true и контора её отдаёт).
-  // Берём самую глубокую: купон outcome.link -> рынок market.link -> событие bk.link.
   const evLink = {};
   for (const bk of bms) {
     let l = bk.link || null;
@@ -146,7 +165,7 @@ function normalizeEvent(ev) {
   const o1x2 = order.filter(([k]) => h2h[k]).map(([k, label]) => ({ key: k, label, books: h2h[k] }));
   if (o1x2.length >= 2) markets["1x2"] = { label: "Исход", lineLabel: null, outcomes: o1x2 };
 
-  // --- Тотал (totals) — берём основную линию (модальную) и только тех БК, кто её квотирует ---
+  // --- Тотал (totals) ---
   const tRows = [];
   for (const bk of bms) {
     const m = (bk.markets || []).find((x) => x.key === "totals");
@@ -209,7 +228,9 @@ app.get("/api/odds", async (req, res) => {
   const t0 = Date.now();
   try {
     const keys = SPORT_KEYS[sport] || SPORT_KEYS.all;
+    log("/api/odds", sport, "fetching keys:", keys.join(","));
     const raw = (await Promise.all(keys.map(fetchSport))).flat();
+    log("/api/odds", sport, "total raw events from all keys:", raw.length);
     const events = raw.map(normalizeEvent).filter((e) => Object.keys(e.markets).length);
     const bookMap = new Map();
     for (const ev of raw) for (const b of ev.bookmakers || []) if (!bookMap.has(b.key)) bookMap.set(b.key, b.title || b.key);
@@ -224,7 +245,7 @@ app.get("/api/odds", async (req, res) => {
   }
 });
 
-// список доступных лиг/ключей у API — пригодится, чтобы заполнить SPORT_KEYS
+// список доступных лиг/ключей у API
 app.get("/api/sports", async (_req, res) => {
   if (!KEY) return res.status(500).json({ error: "ODDS_API_KEY не задан" });
   const r = await fetch(`${BASE}/sports?apiKey=${KEY}`);
@@ -233,7 +254,7 @@ app.get("/api/sports", async (_req, res) => {
 
 app.get("/", (_req, res) => res.json({ ok: true, service: "odds-backend", cacheKeys: [...cache.keys()] }));
 
-// health-чек для мониторинга (Render, UptimeRobot и т.п.). Не использует квоту API.
+// health-чек
 app.get("/health", (_req, res) => res.json({
   ok: true,
   uptime_sec: Math.floor(process.uptime()),
