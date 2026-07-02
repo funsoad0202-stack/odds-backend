@@ -99,6 +99,45 @@ const categoryOf = (k = "") =>
 
 const cache = new Map(); // sport -> { t, data }
 
+// ===== БЕЛЫЙ СПИСОК БК ДЛЯ СНГ =====
+// Оставляем только те конторы, куда игрок из СНГ реально может зарегистрироваться и пополниться.
+// Ключи — как их называет The Odds API. Проверено по прямому запросу к API.
+// Названия можно посмотреть в /api/odds -> books
+const CIS_BOOKS = new Set([
+  "pinnacle",       // Pinnacle — принимает СНГ, крипта, без верификации
+  "onexbet",        // 1xBet — главная контора для СНГ
+  "marathonbet",    // Marathon Bet — российские корни
+  "betvictor",      // Bet Victor — работает с некоторыми СНГ
+  "sport888",       // 888sport
+  "betsson",        // Betsson — Balkan/CIS friendly
+  "unibet_nl",      // Unibet NL — часто открыт для СНГ через VPN
+  "nordicbet",      // Nordic Bet
+  "betfair_ex_eu",  // Betfair Exchange EU
+  "matchbook",      // Matchbook — биржа
+]);
+
+// Главные URL букмекеров (для клика по кэфу — ведём на регистрацию/главную).
+// TODO: заменить на реф-ссылки когда будут партнёрские программы.
+const BOOK_URLS = {
+  pinnacle:      "https://www.pinnacle.com/",
+  onexbet:       "https://1xbet.com/",
+  marathonbet:   "https://www.marathonbet.com/",
+  betvictor:     "https://www.betvictor.com/",
+  sport888:      "https://www.888sport.com/",
+  betsson:       "https://www.betsson.com/",
+  unibet_nl:     "https://www.unibet.nl/",
+  nordicbet:     "https://www.nordicbet.com/",
+  betfair_ex_eu: "https://www.betfair.com/",
+  matchbook:     "https://www.matchbook.com/",
+};
+
+// Фильтруем букмекеров в матче — оставляем только СНГ.
+// Если после фильтра букмекеров < 2, матч выкидываем (не с чем сравнивать).
+function filterCisBooks(ev) {
+  const bms = (ev.bookmakers || []).filter(b => CIS_BOOKS.has(b.key));
+  return { ...ev, bookmakers: bms };
+}
+
 // CORS — пускаем только ваш сайт (ALLOWED_ORIGIN). По умолчанию '*' для теста.
 app.use((req, res, next) => {
   res.set("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
@@ -229,13 +268,16 @@ app.get("/api/odds", async (req, res) => {
   try {
     const keys = SPORT_KEYS[sport] || SPORT_KEYS.all;
     log("/api/odds", sport, "fetching keys:", keys.join(","));
-    const raw = (await Promise.all(keys.map(fetchSport))).flat();
-    log("/api/odds", sport, "total raw events from all keys:", raw.length);
+    const rawAll = (await Promise.all(keys.map(fetchSport))).flat();
+    log("/api/odds", sport, "total raw events from all keys:", rawAll.length);
+    // фильтр по белому списку СНГ-БК + отсекаем матчи, где после фильтра < 2 контор
+    const raw = rawAll.map(filterCisBooks).filter(ev => (ev.bookmakers || []).length >= 2);
+    log("/api/odds", sport, "after CIS filter:", raw.length, "events");
     const events = raw.map(normalizeEvent).filter((e) => Object.keys(e.markets).length);
     const bookMap = new Map();
     for (const ev of raw) for (const b of ev.bookmakers || []) if (!bookMap.has(b.key)) bookMap.set(b.key, b.title || b.key);
-    const books = [...bookMap].map(([id, name]) => ({ id, name }));
-    const data = { updatedAt: new Date().toISOString(), books, events };
+    const books = [...bookMap].map(([id, name]) => ({ id, name, url: BOOK_URLS[id] || null }));
+    const data = { updatedAt: new Date().toISOString(), books, events, bookUrls: BOOK_URLS };
     cache.set(sport, { t: Date.now(), data });
     log("/api/odds", sport, "fetched events=" + events.length, "books=" + books.length, "in " + (Date.now()-t0) + "ms");
     res.json(data);
